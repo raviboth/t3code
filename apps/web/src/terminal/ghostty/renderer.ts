@@ -1,3 +1,5 @@
+import { drawBlockElement, isBlockElementCell } from "./blockGlyphs";
+import { drawLineGlyph, isLineGlyphCell } from "./lineGlyphs";
 import {
   GHOSTTY_CELL_WIDE,
   ghosttyColorsEqual,
@@ -106,6 +108,12 @@ export function renderGhosttySnapshot(options: {
   readonly hoveredLinkRange?: GhosttyCellRange | null;
   /** Vertical origin of row 0; defaults to the horizontal padding. */
   readonly originY?: number;
+  /**
+   * Device pixel ratio the context is scaled by. Cell edges are snapped to this
+   * grid so fractional-scale displays (e.g. 1.25) don't leave a 1px seam at each
+   * cell boundary. Defaults to 1 (no scaling).
+   */
+  readonly devicePixelRatio?: number;
 }): void {
   const {
     context,
@@ -122,6 +130,14 @@ export function renderGhosttySnapshot(options: {
   const selectionBackground = options.selectionBackground ?? DEFAULT_SELECTION_BACKGROUND;
   const hoveredLinkRange = options.hoveredLinkRange ?? null;
   const originY = options.originY ?? padding;
+  // Snap a coordinate to a whole device pixel. With the context scaled by
+  // devicePixelRatio, rounding in CSS space still yields fractional device
+  // positions (10 CSS px * 1.25 = 12.5), so every abutting fill leaves a 1px
+  // partially covered seam. Rounding v*dpr and dividing back lands each edge on
+  // a device pixel, which is where the neighbouring fill lands too.
+  const dpr =
+    options.devicePixelRatio && options.devicePixelRatio > 0 ? options.devicePixelRatio : 1;
+  const snap = (value: number): number => Math.round(value * dpr) / dpr;
   const rowsToDraw = forceFull
     ? Array.from({ length: snapshot.rows }, (_, index) => index)
     : [...snapshot.dirtyRows];
@@ -149,10 +165,19 @@ export function renderGhosttySnapshot(options: {
   for (const rowIndex of rowsToDraw) {
     const row = snapshot.rowData[rowIndex];
     if (!row) continue;
-    const top = originY + rowIndex * metrics.height;
+    // Row edges, background fills, and synthesized glyphs all snap to the same
+    // device-pixel grid so adjacent fills meet without a partially covered seam.
+    const top = snap(originY + rowIndex * metrics.height);
+    const rowBottom = snap(originY + (rowIndex + 1) * metrics.height);
+    const rowHeight = rowBottom - top;
 
     context.fillStyle = cssColor(snapshot.background);
-    context.fillRect(padding, top, snapshot.cols * metrics.width, metrics.height);
+    context.fillRect(
+      snap(padding),
+      top,
+      snap(padding + snapshot.cols * metrics.width) - snap(padding),
+      rowHeight,
+    );
 
     let backgroundStart = 0;
     while (backgroundStart < row.cells.length) {
@@ -171,15 +196,17 @@ export function renderGhosttySnapshot(options: {
         backgroundEnd += 1;
       }
       if (first.selected || !ghosttyColorsEqual(first.background, snapshot.background)) {
-        const left = padding + backgroundStart * metrics.width;
-        const width = (backgroundEnd - backgroundStart) * metrics.width;
+        // Device-grid edges so this fill abuts the neighbouring cell's fill (and
+        // any synthesized glyph) with no sub-pixel seam.
+        const left = snap(padding + backgroundStart * metrics.width);
+        const width = snap(padding + backgroundEnd * metrics.width) - left;
         if (!ghosttyColorsEqual(first.background, snapshot.background)) {
           context.fillStyle = cssColor(first.background);
-          context.fillRect(left, top, width, metrics.height);
+          context.fillRect(left, top, width, rowHeight);
         }
         if (first.selected) {
           context.fillStyle = selectionBackground;
-          context.fillRect(left, top, width, metrics.height);
+          context.fillRect(left, top, width, rowHeight);
         }
       }
       backgroundStart = backgroundEnd;
@@ -193,7 +220,46 @@ export function renderGhosttySnapshot(options: {
         runStart += 1;
         continue;
       }
-      const runEnd = ghosttyTextRunEnd(row.cells, runStart, (cell) => sameTextStyle(cell, first));
+      // Block Elements, Box Drawing, and Powerline separators are painted as
+      // geometry, not font glyphs, so tiled cells (bars, borders, pill
+      // separators) render seamlessly. They also break the surrounding text run
+      // so a neighbouring letter never merges into the same fillText.
+      if (!first.invisible && isBlockElementCell(first.text)) {
+        drawBlockElement(
+          context,
+          first.text.charCodeAt(0),
+          padding + runStart * metrics.width,
+          originY + rowIndex * metrics.height,
+          metrics.width,
+          metrics.height,
+          cssColor(first.foreground),
+          snap,
+        );
+        runStart += 1;
+        continue;
+      }
+      if (!first.invisible && isLineGlyphCell(first.text)) {
+        drawLineGlyph(
+          context,
+          first.text.charCodeAt(0),
+          padding + runStart * metrics.width,
+          originY + rowIndex * metrics.height,
+          metrics.width,
+          metrics.height,
+          cssColor(first.foreground),
+          snap,
+        );
+        runStart += 1;
+        continue;
+      }
+      const runEnd = ghosttyTextRunEnd(
+        row.cells,
+        runStart,
+        (cell) =>
+          sameTextStyle(cell, first) &&
+          !isBlockElementCell(cell.text) &&
+          !isLineGlyphCell(cell.text),
+      );
       const text = row.cells
         .slice(runStart, runEnd)
         .map((cell) => cell.text)
@@ -233,20 +299,27 @@ export function renderGhosttySnapshot(options: {
         continue;
       }
       context.fillStyle = cssColor(cell.foreground);
-      const left = padding + column * metrics.width;
+      // Per-cell decoration segments must share device-pixel edges with their
+      // neighbours, or an underlined word shows a gap at every cell boundary.
+      const left = snap(padding + column * metrics.width);
+      const width = snap(padding + (column + 1) * metrics.width) - left;
       if (cell.underline || hoveredLink) {
-        context.fillRect(left, top + metrics.height - 2, metrics.width, 1);
+        context.fillRect(left, top + metrics.height - 2, width, 1);
       }
       if (cell.strikethrough) {
-        context.fillRect(left, top + Math.floor(metrics.height * 0.55), metrics.width, 1);
+        context.fillRect(left, top + Math.floor(metrics.height * 0.55), width, 1);
       }
-      if (cell.overline) context.fillRect(left, top + 1, metrics.width, 1);
+      if (cell.overline) context.fillRect(left, top + 1, width, 1);
     }
   }
 
   if (cursorOn && snapshot.cursorVisible && snapshot.cursorX >= 0 && snapshot.cursorY >= 0) {
-    const left = padding + snapshot.cursorX * metrics.width;
-    const top = originY + snapshot.cursorY * metrics.height;
+    // Same device-pixel grid as the cell underneath, so a block cursor covers a
+    // synthesized glyph edge to edge instead of leaving a sliver of it showing.
+    const left = snap(padding + snapshot.cursorX * metrics.width);
+    const cellRight = snap(padding + (snapshot.cursorX + 1) * metrics.width);
+    const top = snap(originY + snapshot.cursorY * metrics.height);
+    const cellBottom = snap(originY + (snapshot.cursorY + 1) * metrics.height);
     context.fillStyle = cssColor(snapshot.cursor);
     if (!focused) {
       // An unfocused terminal draws a hollow cursor so the active pane is obvious.
@@ -260,12 +333,19 @@ export function renderGhosttySnapshot(options: {
       context.strokeStyle = cssColor(snapshot.cursor);
       context.strokeRect(left + 0.5, top + 0.5, metrics.width - 1, metrics.height - 1);
     } else {
-      context.fillRect(left, top, metrics.width, metrics.height);
+      context.fillRect(left, top, cellRight - left, cellBottom - top);
       const cell = snapshot.rowData[snapshot.cursorY]?.cells[snapshot.cursorX];
       if (cell?.text) {
         context.font = fontForCell(cell, fontSize, fontFamily);
         context.fillStyle = cssColor(snapshot.background);
-        context.fillText(cell.text, left, top + metrics.baseline, metrics.width);
+        // Text keeps the unsnapped origin the text run used, so the glyph does not
+        // shift when the cursor lands on it.
+        context.fillText(
+          cell.text,
+          padding + snapshot.cursorX * metrics.width,
+          originY + snapshot.cursorY * metrics.height + metrics.baseline,
+          metrics.width,
+        );
       }
     }
   }

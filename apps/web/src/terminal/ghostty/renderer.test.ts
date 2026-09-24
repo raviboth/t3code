@@ -282,4 +282,64 @@ describe("renderGhosttySnapshot", () => {
 
     expect(clearedRows).toEqual([4, 36, 36]);
   });
+
+  it("paints block elements as geometry and keeps them out of text runs", () => {
+    const fillRectCalls: number[][] = [];
+    const fillTextCalls: unknown[][] = [];
+    const context = {
+      canvas: { width: 200, height: 40 },
+      beginPath: () => {},
+      clip: () => {},
+      fillRect: (...args: number[]) => fillRectCalls.push(args),
+      fillText: (...args: unknown[]) => fillTextCalls.push(args),
+      rect: () => {},
+      resetTransform: () => {},
+      restore: () => {},
+      save: () => {},
+      set fillStyle(_value: string) {},
+      set font(_value: string) {},
+      set globalAlpha(_value: number) {},
+      get globalAlpha() {
+        return 1;
+      },
+      set textBaseline(_value: string) {},
+    } as unknown as CanvasRenderingContext2D;
+    // "a█b": the full block must break the run so the letters never merge into
+    // one fillText across it, and it must be painted as a full-cell rectangle.
+    const cells = [cell("a"), cell("█"), cell("b")];
+    const snapshot: GhosttySnapshot = {
+      cols: 3,
+      rows: 1,
+      foreground: { r: 255, g: 255, b: 255 },
+      background: { r: 0, g: 0, b: 0 },
+      cursor: { r: 255, g: 255, b: 255 },
+      cursorX: 0,
+      cursorY: 0,
+      cursorVisible: false,
+      cursorBlinking: false,
+      cursorStyle: 1,
+      dirtyRows: new Set([0]),
+      rowData: [{ cells, text: "a█b", isWrapContinuation: false, wrapsToNext: false }],
+    };
+
+    renderGhosttySnapshot({
+      context,
+      snapshot,
+      metrics: { width: 10, height: 20, baseline: 15 },
+      fontSize: 12,
+      fontFamily: "monospace",
+      padding: 4,
+      forceFull: false,
+      cursorOn: false,
+    });
+
+    // Letters stay as single-cell text runs on either side of the block
+    // (baseline 15 + origin padding 4 -> y 19).
+    expect(fillTextCalls).toEqual([
+      ["a", 4, 19, 10],
+      ["b", 24, 19, 10],
+    ]);
+    // The block cell fills its whole cell (x=14, y=4, width=10) with no font glyph.
+    expect(fillRectCalls).toContainEqual([14, 4, 10, 20]);
+  });
 });

@@ -1923,6 +1923,10 @@ export class GhosttyTerminalSurface {
       fontFamily: this.fontFamily,
       padding: CONTENT_PADDING,
       originY: this.originY,
+      // The context is scaled by devicePixelRatio, so cell edges must snap to the
+      // device grid (not the CSS grid) or fractional-scale displays show a 1px
+      // seam at every cell boundary.
+      devicePixelRatio: window.devicePixelRatio || 1,
       forceFull: this.forceFullRender,
       cursorOn: this.cursorOn,
       previousCursorY: this.renderedCursorY,
